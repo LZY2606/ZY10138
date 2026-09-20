@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>率定曲线离线管理系统</title>
+<link rel="stylesheet" href="/style.css"/>
+</head>
+<body>
+<header>
+  <h1>水文站率定曲线管理</h1>
+  <div class="hmeta">
+    站点：
+    <select id="station"></select>
+    <span id="deadband" class="muted"></span>
+  </div>
+</header>
+
+<main>
+  <section class="card chart-card">
+    <div class="card-head">
+      <h2>实测点 · 曲线段 · 标定范围</h2>
+      <div class="legend">
+        <span><i class="dot ok"></i>采用实测点</span>
+        <span><i class="dot excluded"></i>已排除（回水）</span>
+        <span><i class="line common"></i>common</span>
+        <span><i class="line rising"></i>rising</span>
+        <span><i class="line falling"></i>falling</span>
+        <span><i class="band"></i>超出标定范围</span>
+      </div>
+    </div>
+    <div id="chart"></div>
+    <p class="hint" id="chartHint"></p>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>曲线版本</h2>
+      <div>
+        <select id="curveSelect"></select>
+        <button id="newCurveBtn">新建曲线</button>
+      </div>
+    </div>
+    <div id="curveMeta" class="muted"></div>
+    <div class="seg-toolbar">
+      <label>目标分支
+        <select id="addBranch">
+          <option value="common">common</option>
+          <option value="rising">rising</option>
+          <option value="falling">falling</option>
+        </select>
+      </label>
+      <button id="addSegmentBtn">新增分段</button>
+      <span class="muted">提示：相邻段需一端闭一端开；直接改端点可调整连接点。</span>
+    </div>
+    <table id="segmentTable" class="grid">
+      <thead>
+        <tr>
+          <th>分支</th><th>水位下界</th><th>下端</th>
+          <th>水位上界</th><th>上端</th><th>系数 c0,c1,c2…</th><th>备注</th><th></th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div id="validationBox" class="validation"></div>
+    <div class="row-actions">
+      <label>修订理由 <input id="reason" placeholder="如：汛后河床下切，重率高水段"/></label>
+      <button id="fitBtn" class="secondary">用所选实测点拟合一段</button>
+      <button id="saveBtn" class="primary">保存草稿（带版本号）</button>
+      <button id="publishBtn" class="primary">发布…</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>实测点与残差</h2>
+      <div>
+        <label class="inline">残差参照
+          <select id="residualTarget">
+            <option value="current">当前编辑曲线</option>
+          </select>
+        </label>
+        <button id="residualBtn" class="secondary">计算残差</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table id="residualTable" class="grid">
+        <thead><tr>
+          <th>时间</th><th>水势</th><th>水位</th><th>实测流量</th>
+          <th>曲线流量</th><th>残差</th><th>质量</th><th>回水排除</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>影响预览与批量重算</h2>
+      <div>
+        水位序列：<select id="series"></select>
+        <button id="previewBtn" class="secondary">预览历史日流量变化</button>
+        <button id="recomputeBtn" class="primary">发布后重算所选序列</button>
+      </div>
+    </div>
+    <div id="previewSummary" class="muted"></div>
+    <div class="table-wrap">
+      <table id="previewTable" class="grid">
+        <thead><tr>
+          <th>时间</th><th>原始水位</th><th>分支</th>
+          <th>旧流量(生产)</th><th>旧标志</th>
+          <th>预览新流量</th><th>新标志</th><th>是否改变</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>生效时间（半开区间）</h2></div>
+    <table id="periodTable" class="grid">
+      <thead><tr><th>曲线版本</th><th>起 [</th><th>止 )</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+
+<!-- 发布对话框 -->
+<div id="publishModal" class="modal hidden">
+  <div class="modal-box">
+    <h3>发布曲线</h3>
+    <p class="muted">生效期为半开区间 [起, 止)；止留空表示持续生效。发布将自动收束当前开放区间。</p>
+    <label>起始时间（UTC ISO-8601）<input id="pubStart" placeholder="2026-10-01T00:00:00Z"/></label>
+    <label>结束时间（可空）<input id="pubEnd" placeholder="留空 = 持续生效"/></label>
+    <div class="modal-actions">
+      <button id="pubCancel" class="secondary">取消</button>
+      <button id="pubConfirm" class="primary">确认发布</button>
+    </div>
+  </div>
+</div>
+
+<!-- 拟合对话框 -->
+<div id="fitModal" class="modal hidden">
+  <div class="modal-box">
+    <h3>拟合一段</h3>
+    <p class="muted">对未排除的实测点做最小二乘拟合（仅生成系数，不改写任何原始点）。</p>
+    <label>分支 <select id="fitBranch"><option>common</option><option>rising</option><option>falling</option></select></label>
+    <label>阶数 <input id="fitDegree" type="number" value="2" min="0" max="4"/></label>
+    <label>水位下界（可空=最小实测）<input id="fitLow" type="number" step="0.01"/></label>
+    <label>水位上界（可空=最大实测）<input id="fitHigh" type="number" step="0.01"/></label>
+    <label>下端 <select id="fitLowOpen"><option value="closed">闭 [</option><option value="open">开 (</option></select></label>
+    <label>上端 <select id="fitHighOpen"><option value="open">开 )</option><option value="closed">闭 ]</option></select></label>
+    <div id="fitResult" class="muted"></div>
+    <div class="modal-actions">
+      <button id="fitCancel" class="secondary">取消</button>
+      <button id="fitRun" class="secondary">计算</button>
+      <button id="fitAppend" class="primary">加入分段表</button>
+    </div>
+  </div>
+</div>
+
+<div id="conflictBanner" class="conflict hidden"></div>
+<div id="toast" class="toast hidden"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
