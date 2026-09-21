@@ -34,3 +34,8 @@ coverage/
 .vite/
 .turbo/
 *.tsbuildinfo
+
+# 本地运行时 SQLite 文件（保留 data/ 目录占位）
+data/*.db
+data/*.db-shm
+data/*.db-wal

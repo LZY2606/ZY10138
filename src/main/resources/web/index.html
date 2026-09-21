@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>水位-流量率定曲线管理系统</title>
+<style>
+  :root { --bd:#d7dce3; --mut:#6b7280; --accent:#1d6fe0; --warn:#b45309; --err:#b91c1c;
+          --ok:#15803d; --bg:#f6f7f9; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background:var(--bg); color:#1f2937; font-size:13px; }
+  header { background:#10233f; color:#fff; padding:10px 18px; display:flex; align-items:center;
+           gap:16px; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  header .meta { color:#9fb3d1; font-size:12px; }
+  main { display:grid; grid-template-columns: 380px 1fr; gap:12px; padding:12px; }
+  .card { background:#fff; border:1px solid var(--bd); border-radius:8px; padding:12px;
+          margin-bottom:12px; }
+  .card h2 { font-size:13px; margin:0 0 8px; display:flex; justify-content:space-between;
+             align-items:center; }
+  .muted { color:var(--mut); font-size:12px; }
+  button { border:1px solid var(--bd); background:#fff; border-radius:6px; padding:4px 10px;
+           cursor:pointer; font-size:12px; }
+  button:hover { border-color:var(--accent); color:var(--accent); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.danger { color:var(--err); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th, td { text-align:right; padding:3px 5px; border-bottom:1px solid #eef0f3; }
+  th:first-child, td:first-child, th.l, td.l { text-align:left; }
+  tr.excluded td { text-decoration:line-through; color:var(--mut); }
+  .q-OK { color:var(--ok); font-weight:600; }
+  .q-OUT_OF_RANGE { color:var(--warn); font-weight:600; }
+  .q-BRANCH_UNDETERMINED { color:#a16207; font-weight:600; }
+  .q-MISSING_STAGE { color:var(--err); font-weight:600; }
+  .q-OVERFLOW { color:#7c2d12; font-weight:600; }
+  .seg-row td input { width:100%; padding:2px 4px; font-size:12px; }
+  .tag { display:inline-block; padding:0 6px; border-radius:10px; font-size:11px;
+         border:1px solid var(--bd); }
+  .tag.COMMON { background:#eef4ff; }
+  .tag.RISING { background:#eafaf1; }
+  .tag.FALLING { background:#fdf2f8; }
+  .tag.DRAFT { background:#fff7ed; color:var(--warn); border-color:#fed7aa; }
+  .tag.PUBLISHED { background:#ecfdf5; color:var(--ok); border-color:#a7f3d0; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:6px 0; }
+  textarea, select, input[type=text], input[type=datetime-local] {
+    font:inherit; padding:3px 6px; border:1px solid var(--bd); border-radius:6px; }
+  textarea { width:100%; }
+  #toast { position:fixed; right:16px; bottom:16px; max-width:420px; z-index:50; }
+  .toast { background:#111827; color:#fff; padding:8px 12px; border-radius:8px; margin-top:8px;
+           font-size:12px; white-space:pre-wrap; }
+  .toast.err { background:var(--err); }
+  svg text { font-size:10px; fill:#4b5563; }
+  .legend span { margin-right:12px; }
+  .issue-ERROR { color:var(--err); }
+  .issue-WARNING { color:var(--warn); }
+  details summary { cursor:pointer; font-weight:600; margin:4px 0; }
+  .diff { display:inline-block; min-width:84px; }
+  .changed { background:#fef9c3; }
+</style>
+</head>
+<body>
+<header>
+  <h1>水位-流量率定曲线管理系统</h1>
+  <span class="meta" id="stationMeta"></span>
+  <span class="meta">离线 · SQLite · 半开区间语义</span>
+</header>
+<main>
+  <div id="left">
+    <div class="card">
+      <h2>实测点（原始数据不可改写）
+        <span class="muted" id="measSummary"></span></h2>
+      <div style="max-height:340px; overflow:auto">
+        <table id="measTable">
+          <thead><tr>
+            <th class="l">时间</th><th>水位 m</th><th>流量 m³/s</th><th>分支</th><th>操作</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="muted">勾除“纳入”即标记该点受回水影响排除出拟合；原始水位与实测流量列永不被修改。</div>
+    </div>
+
+    <div class="card">
+      <h2>曲线版本与有效期</h2>
+      <table id="curveTable">
+        <thead><tr><th class="l">版本</th><th class="l">状态</th><th>生效起点</th><th>修订理由</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="row">
+        <button id="newDraftBtn">基于最新版本新建草稿</button>
+      </div>
+      <div class="muted">有效期为半开 [validFrom, next.validFrom)，同一时刻仅有一份已发布曲线；草稿不进入生产。</div>
+    </div>
+
+    <div class="card">
+      <h2>分段曲线编辑 <span class="muted" id="editMeta"></span></h2>
+      <div id="segEditor"></div>
+      <div class="row">
+        <button id="fitBtn">最小二乘拟合草稿</button>
+        <button id="normalizeBtn">规范化端点（下闭上开）</button>
+        <button id="saveBtn" class="primary">保存草稿</button>
+      </div>
+      <div id="segIssues"></div>
+      <details><summary>端点规则说明</summary>
+        <div class="muted">同分支相邻段在连接水位处必须开闭互补：上段不含、下段含（或反之），
+        接缝恰好命中一次；禁止两端都闭（重复命中）或两端都开（留缝）。
+        各分支（公共/上涨/下落）独立校验；上涨或下落支缺段时自动回退公共段。</div>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>发布</h2>
+      <div class="row">
+        <label>生效时间(UTC)</label>
+        <input type="text" id="validFrom" value="2026-07-01T00:00:00Z" style="width:200px">
+      </div>
+      <div class="row">
+        <label>修订理由</label>
+        <input type="text" id="pubReason" style="flex:1" value="排除回水点后重新拟合">
+      </div>
+      <button id="publishBtn" class="primary">校验并发布（原子操作）</button>
+      <div class="muted">发布只生成新版本曲线，不重算任何历史派生序列。</div>
+    </div>
+  </div>
+
+  <div id="right">
+    <div class="card">
+      <h2>率定曲线 × 实测点 × 残差
+        <span class="legend">
+          <span style="color:#374151">● 实测点</span>
+          <span style="color:#888">○ 已排除</span>
+          <span style="color:#1d6fe0">— 公共段</span>
+          <span style="color:#16a34a">— 上涨支</span>
+          <span style="color:#db2777">— 下落支</span>
+          <span style="color:#d97706">✕ 残差</span>
+        </span>
+      </h2>
+      <svg id="ratingChart" width="100%" height="300"></svg>
+      <div style="max-height:160px; overflow:auto">
+        <table id="residTable">
+          <thead><tr><th class="l">水位</th><th>实测</th><th>预测</th><th>残差</th>
+          <th>分支</th><th>状态</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>历史水位 / 派生流量 / 影响预览
+        <span class="muted" id="previewSummary"></span>
+      </h2>
+      <div class="row">
+        <label>窗口(UTC，半开)</label>
+        <input type="text" id="winFrom" value="2026-08-01T00:00:00Z" style="width:190px">
+        <span>→</span>
+        <input type="text" id="winTo" value="2026-09-16T00:00:00Z" style="width:190px">
+        <button id="previewBtn">预览草稿影响（只读）</button>
+      </div>
+      <svg id="seriesChart" width="100%" height="280"></svg>
+      <div class="row">
+        <label>重算模式</label>
+        <select id="recomputeMode">
+          <option value="PUBLISHED" selected>PUBLISHED：各时刻用当时已发布曲线</option>
+          <option value="CURVE">CURVE：全程使用指定已发布曲线</option>
+        </select>
+        <button id="recomputeBtn" class="primary">显式重算所选窗口（原子、幂等）</button>
+        <span class="muted" id="recomputeResult"></span>
+      </div>
+      <div class="muted">相同作业 ID 的重试返回首次结果，绝不产生第二套序列；窗口外的派生行保持不变。</div>
+      <div style="max-height:240px; overflow:auto; margin-top:8px">
+        <table id="seriesTable">
+          <thead><tr>
+            <th class="l">时间</th><th>水位</th><th>现行流量</th><th>预览流量</th>
+            <th>质量</th><th>分支</th><th>曲线</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</main>
+<div id="toast"></div>
+<script>
+"use strict";
+
+let S = null;                 // /api/state 完整快照
+let selectedCurveId = null;   // 当前编辑的曲线
+let previewData = null;       // 最近一次预览结果
+let jobId = crypto.randomUUID();
+
+const $ = (id) => document.getElementById(id);
+const qName = {
+  OK: "正常", OUT_OF_RANGE: "超标定范围", BRANCH_UNDETERMINED: "分支无法判定",
+  MISSING_STAGE: "原始水位缺失", OVERFLOW: "计算溢出"
+};
+const branchName = { COMMON: "公共", RISING: "上涨", FALLING: "下落" };
+
+function toast(msg, isErr) {
+  const d = document.createElement("div");
+  d.className = "toast" + (isErr ? " err" : "");
+  d.textContent = msg;
+  $("toast").appendChild(d);
+  setTimeout(() => d.remove(), 6000);
+}
+
+async function api(method, path, body) {
+  const res = await fetch(path, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const text = await res.text();
+  const json = text ? JSON.parse(text) : null;
+  if (!res.ok) {
+    let msg = json?.error || (method + " " + path + " -> " + res.status);
+    if (json?.details) msg += "\n" + json.details.map(i => "[" + i.level + "] " + i.message).join("\n");
+    const err = new Error(msg);
+    err.payload = json;
+    err.status = res.status;
+    throw err;
+  }
+  return json;
+}
+
+async function refresh() {
+  S = await api("GET", "/api/state");
+  if (!selectedCurveId || !S.curves.some(c => c.id === selectedCurveId)) {
+    selectedCurveId = (S.curves.find(c => c.status === "DRAFT") || S.curves[S.curves.length - 1]).id;
+  }
+  renderAll();
+}
+
+function curve() { return S.curves.find(c => c.id === selectedCurveId); }
+
+function fmtQ(v) { return v == null ? "—" : Number(v).toFixed(2); }
+function day(ts) { return ts.slice(0, 10); }
+function hhmm(ts) { return ts.slice(11, 16); }
+
+function renderStation() {
+  $("stationMeta").textContent = S.station.code + " · " + S.station.name +
+    " · 死区 " + S.station.deadbandM + " m";
+  const used = S.measurements.filter(m => !m.excluded).length;
+  $("measSummary").textContent = used + "/" + S.measurements.length + " 纳入";
+}
+
+function renderMeasurements() {
+  const tb = $("measTable").querySelector("tbody");
+  tb.innerHTML = "";
+  for (const m of S.measurements) {
+    const tr = document.createElement("tr");
+    if (m.excluded) tr.className = "excluded";
+    tr.innerHTML =
+      `<td class="l">${day(m.observedAt)} ${hhmm(m.observedAt)}</td>` +
+      `<td>${m.stageM.toFixed(2)}</td>` +
+      `<td>${m.dischargeM3s.toFixed(1)}</td>` +
+      `<td><span class="tag ${m.branchHint || ""}">${branchName[m.branchHint] || "?"}</span></td>` +
+      `<td><label><input type="checkbox" ${m.excluded ? "" : "checked"}> 纳入</label></td>`;
+    tr.querySelector("input").addEventListener("change", async (e) => {
+      try {
+        await api("POST", "/api/measurements/exclude", {
+          measurementId: m.id, excluded: !e.target.checked,
+          note: !e.target.checked ? (m.note || "用户标记：受回水影响排除") : m.note
+        });
+        await refresh();
+      } catch (err) { toast(err.message, true); e.target.checked = !e.target.checked; }
+    });
+    tr.title = m.note || "";
+    tb.appendChild(tr);
+  }
+}
+
+function renderCurves() {
+  const tb = $("curveTable").querySelector("tbody");
+  tb.innerHTML = "";
+  const pubMap = new Map(S.publications.map(p => [p[1], p[0]]));
+  for (const c of S.curves) {
+    const tr = document.createElement("tr");
+    const selected = c.id === selectedCurveId;
+    tr.innerHTML =
+      `<td class="l"><a href="#" data-id="${c.id}">v${c.version}</a>${selected ? " ◄" : ""}</td>` +
+      `<td class="l"><span class="tag ${c.status}">${c.status === "DRAFT" ? "草稿" : "已发布"}</span></td>` +
+      `<td>${c.validFrom ? day(c.validFrom) : "—"}</td>` +
+      `<td class="l muted">${c.revisedReason || ""}</td>`;
+    tr.querySelector("a").addEventListener("click", (e) => {
+      e.preventDefault(); selectedCurveId = c.id; previewData = null; renderAll();
+    });
+    tb.appendChild(tr);
+  }
+  const c = curve();
+  $("editMeta").textContent = "当前：v" + c.version + " (" +
+    (c.status === "DRAFT" ? "草稿" : "已发布只读") + ") rev=" + c.rev.slice(-6);
+  $("fitBtn").disabled = $("saveBtn").disabled =
+    $("normalizeBtn").disabled = $("publishBtn").disabled = c.status !== "DRAFT";
+  renderSegmentEditor();
+}
+
+// ---------- 分段编辑器 ----------
+let editorRows = [];
+
+function renderSegmentEditor() {
+  const c = curve();
+  editorRows = c.segments.map(s => ({ ...s, coefficients: s.coefficients.join(", ") }));
+  const host = $("segEditor");
+  host.innerHTML =
+    `<table class="seg-row"><thead><tr>
+      <th class="l">分支</th><th>下界</th><th>下含</th><th>上界</th><th>上含</th>
+      <th class="l">系数 c0,c1,c2…（升幂）</th><th></th>
+    </tr></thead><tbody></tbody></table>`;
+  const tb = host.querySelector("tbody");
+  editorRows.forEach((s, i) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td><select data-k="branch">
+        ${["COMMON", "RISING", "FALLING"].map(b =>
+          `<option value="${b}" ${b === s.branch ? "selected" : ""}>${branchName[b]}</option>`).join("")}
+      </select></td>
+      <td><input data-k="stageLow" value="${s.stageLow}"></td>
+      <td><input type="checkbox" data-k="lowInclude" ${s.lowInclude ? "checked" : ""}></td>
+      <td><input data-k="stageHigh" value="${s.stageHigh}"></td>
+      <td><input type="checkbox" data-k="highInclude" ${s.highInclude ? "checked" : ""}></td>
+      <td><input data-k="coefficients" value="${s.coefficients}"></td>
+      <td><button data-act="del">删</button></td>`;
+    tr.querySelectorAll("[data-k]").forEach(el => {
+      el.addEventListener("input", () => collectEditorRow(tr, i));
+      el.addEventListener("change", () => collectEditorRow(tr, i));
+    });
+    tr.querySelector('[data-act="del"]').addEventListener("click", () => {
+      editorRows.splice(i, 1); renderSegmentEditor();
+    });
+    tb.appendChild(tr);
+  });
+  const add = document.createElement("div");
+  add.className = "row";
+  add.innerHTML = `<button id="addSegBtn">＋ 添加段</button>
+    <span class="muted">Q = c0 + c1·h + c2·h² …（h 单位 m，Q 单位 m³/s）</span>`;
+  host.appendChild(add);
+  $("addSegBtn").addEventListener("click", () => {
+    editorRows.push({ branch: "COMMON", stageLow: 0, stageHigh: 1,
+      lowInclude: true, highInclude: false, coefficients: "0, 1" });
+    renderSegmentEditor();
+  });
+  renderIssues([]);
+  scheduleValidate();
+}
+
+let validateTimer = null;
+function scheduleValidate() {
+  clearTimeout(validateTimer);
+  validateTimer = setTimeout(async () => {
+    try {
+      const res = await api("POST", "/api/segments/validate", { segments: collectSegments() });
+      renderIssues(res.issues);
+    } catch (err) { /* ignore transient parse states */ }
+  }, 250);
+}
+
+function collectEditorRow(tr, i) {
+  const get = (k) => tr.querySelector(`[data-k="${k}"]`);
+  editorRows[i] = {
+    branch: get("branch").value,
+    stageLow: parseFloat(get("stageLow").value),
+    lowInclude: get("lowInclude").checked,
+    stageHigh: parseFloat(get("stageHigh").value),
+    highInclude: get("highInclude").checked,
+    coefficients: get("coefficients").value
+  };
+}
+
+function collectSegments() {
+  // 先同步当前 DOM（编辑器未渲染时直接返回缓存）
+  const rows = document.querySelectorAll("#segEditor tbody tr");
+  if (!rows.length) return editorRows;
+  rows.forEach((tr, i) => collectEditorRow(tr, i));
+  return editorRows.map(s => ({
+    branch: s.branch,
+    stageLow: s.stageLow, lowInclude: s.lowInclude,
+    stageHigh: s.stageHigh, highInclude: s.highInclude,
+    coefficients: s.coefficients.split(",").map(x => parseFloat(x.trim()))
+  }));
+}
+
+function renderIssues(issues) {
+  const host = $("segIssues");
+  if (!issues.length) { host.innerHTML = `<div class="muted">分段校验：无问题</div>`; return; }
+  host.innerHTML = issues.map(i =>
+    `<div class="issue-${i.level}">[${i.level}] ${i.message}</div>`).join("");
+}
+
+$("saveBtn").addEventListener("click", async () => {
+  const c = curve();
+  try {
+    const segments = collectSegments();
+    if (segments.some(s => s.coefficients.some(v => !isFinite(v))))
+      throw new Error("系数必须都是有限数");
+    await api("PUT", `/api/curves/${c.id}/segments`, {
+      segments, expectedRev: c.rev, reason: c.revisedReason
+    });
+    toast("草稿已保存");
+    await refresh();
+  } catch (err) {
+    if (err.status === 409) {
+      const choice = confirm("保存冲突：该曲线已被他人修改。\n" +
+        (err.payload?.serverRev ? "服务端当前 rev=" + err.payload.serverRev + "\n" : "") +
+        "确定放弃本地编辑并加载服务端版本查看差异？");
+      if (choice) await refresh();
+    } else toast(err.message, true);
+  }
+});
+
+$("normalizeBtn").addEventListener("click", () => {
+  // 前端本地规范化（与后端 normalizeEndpoints 同语义）：同分支按水位排序，下闭上开，末段上闭
+  const groups = {};
+  for (const s of editorRows) (groups[s.branch] ||= []).push(s);
+  for (const b of Object.keys(groups)) {
+    const arr = groups[b].sort((a, z) => a.stageLow - z.stageLow);
+    arr.forEach((s, i) => { s.lowInclude = true; s.highInclude = i === arr.length - 1; });
+  }
+  renderSegmentEditor();
+});
+
+$("fitBtn").addEventListener("click", async () => {
+  try {
+    const fitted = await api("POST", `/api/curves/${curve().id}/fit`);
+    toast("拟合完成（仅写入草稿段，实测点未改动）");
+    await refresh();
+  } catch (err) { toast(err.message, true); }
+});
+
+$("newDraftBtn").addEventListener("click", async () => {
+  try {
+    const d = await api("POST", "/api/curves/draft",
+      { stationId: S.station.id, reason: "新建修订草稿" });
+    selectedCurveId = d.id;
+    await refresh();
+    toast("已创建草稿 v" + d.version);
+  } catch (err) { toast(err.message, true); }
+});
+
+$("publishBtn").addEventListener("click", async () => {
+  const c = curve();
+  try {
+    await api("POST", `/api/curves/${c.id}/publish`, {
+      validFrom: $("validFrom").value.trim(),
+      reason: $("pubReason").value.trim() || "无说明",
+      expectedRev: c.rev
+    });
+    toast("已发布。历史派生序列不会自动改变，需要时请显式重算。");
+    jobId = crypto.randomUUID();
+    await refresh();
+  } catch (err) { toast(err.message, true); }
+});
+
+// ---------- SVG 通用 ----------
+const SVGNS = "http://www.w3.org/2000/svg";
+function el(name, attrs, parent) {
+  const e = document.createElementNS(SVGNS, name);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+
+function drawRatingChart(residuals) {
+  const svg = $("ratingChart");
+  svg.innerHTML = "";
+  const W = svg.clientWidth || 900, H = 300, P = 38;
+  el("rect", { width: W, height: H, fill: "#fff" }, svg);
+
+  const stages = S.measurements.map(m => m.stageM);
+  const c = curve();
+  const hMin = Math.min(...stages, ...c.segments.map(s => s.stageLow)) - 0.2;
+  const hMax = Math.max(...stages, ...c.segments.map(s => s.stageHigh)) + 0.2;
+  const qVals = S.measurements.map(m => m.dischargeM3s);
+  for (const s of c.segments)
+    for (let i = 0; i <= 40; i++) {
+      const h = s.stageLow + (s.stageHigh - s.stageLow) * i / 40;
+      const q = evalPoly(s.coefficients, h);
+      if (isFinite(q) && Math.abs(q) < 1e6) qVals.push(q);
+    }
+  const qMin = Math.max(0, Math.min(...qVals) - 5), qMax = Math.max(...qVals) + 5;
+  const X = (h) => P + (h - hMin) / (hMax - hMin) * (W - 2 * P);
+  const Y = (q) => H - P - (q - qMin) / (qMax - qMin) * (H - 2 * P);
+
+  // 网格与坐标
+  for (let i = 0; i <= 5; i++) {
+    const h = hMin + (hMax - hMin) * i / 5;
+    el("line", { x1: X(h), x2: X(h), y1: P, y2: H - P, stroke: "#f0f1f4" }, svg);
+    el("text", { x: X(h), y: H - P + 14, "text-anchor": "middle" }, svg).textContent = h.toFixed(1);
+  }
+  for (let i = 0; i <= 4; i++) {
+    const q = qMin + (qMax - qMin) * i / 4;
+    el("text", { x: P - 6, y: Y(q) + 3, "text-anchor": "end" }, svg).textContent = q.toFixed(0);
+  }
+  el("text", { x: W / 2, y: H - 4, "text-anchor": "middle" }, svg).textContent = "水位 h (m)";
+  el("text", { x: 12, y: H / 2, transform: `rotate(-90 12 ${H / 2})`, "text-anchor": "middle" }, svg)
+    .textContent = "流量 Q (m³/s)";
+
+  // 曲线段
+  const colors = { COMMON: "#1d6fe0", RISING: "#16a34a", FALLING: "#db2777" };
+  for (const s of c.segments) {
+    let d = "";
+    for (let i = 0; i <= 60; i++) {
+      const h = s.stageLow + (s.stageHigh - s.stageLow) * i / 60;
+      const q = evalPoly(s.coefficients, h);
+      if (!isFinite(q)) continue;
+      d += (i === 0 ? "M" : "L") + X(h).toFixed(1) + "," + Y(Math.min(Math.max(q, qMin), qMax)).toFixed(1);
+    }
+    el("path", { d, fill: "none", stroke: colors[s.branch], "stroke-width": 2,
+      "stroke-dasharray": c.status === "DRAFT" ? "6 3" : "none" }, svg);
+  }
+
+  // 实测点 + 残差竖线
+  for (const m of S.measurements) {
+    const r = residuals.find(x => x.measurementId === m.id);
+    if (r && r.covered && r.predictedDischarge != null) {
+      el("line", {
+        x1: X(m.stageM), x2: X(m.stageM),
+        y1: Y(m.dischargeM3s), y2: Y(r.predictedDischarge),
+        stroke: "#d97706", "stroke-width": 1
+      }, svg);
+    }
+    el("circle", {
+      cx: X(m.stageM), cy: Y(m.dischargeM3s), r: m.excluded ? 4 : 3.2,
+      fill: m.excluded ? "#fff" : colors[m.branchHint] || "#374151",
+      stroke: colors[m.branchHint] || "#374151",
+      "fill-opacity": m.excluded ? 1 : 0.85
+    }, svg);
+  }
+}
+
+function evalPoly(coef, x) {
+  let y = 0;
+  for (let i = coef.length - 1; i >= 0; i--) y = y * x + coef[i];
+  return y;
+}
+
+function renderResiduals() {
+  // 残差来自当前编辑曲线；草稿编辑后以服务端已保存版本为准
+  const c = curve();
+  api("GET", `/api/curves/${c.id}/residuals`).then(res => {
+    const tb = $("residTable").querySelector("tbody");
+    tb.innerHTML = "";
+    for (const r of res.residuals) {
+      const tr = document.createElement("tr");
+      if (r.excluded) tr.style.opacity = 0.5;
+      tr.innerHTML =
+        `<td class="l">${r.stageM.toFixed(2)}</td>` +
+        `<td>${r.observedDischarge.toFixed(1)}</td>` +
+        `<td>${r.predictedDischarge == null ? "—" : r.predictedDischarge.toFixed(1)}</td>` +
+        `<td>${r.residual == null ? "—" : r.residual.toFixed(2)}</td>` +
+        `<td>${branchName[r.branch] || "?"}</td>` +
+        `<td>${r.excluded ? "已排除" : r.covered ? "已覆盖" : "超定义域"}</td>`;
+      tb.appendChild(tr);
+    }
+    drawRatingChart(res.residuals);
+  }).catch(err => toast(err.message, true));
+}
+
+// ---------- 时序图 ----------
+function drawSeriesChart() {
+  const svg = $("seriesChart");
+  svg.innerHTML = "";
+  const W = svg.clientWidth || 900, H = 280, P = 40;
+  const rows = previewData || S.discharge.map(p => ({
+    ts: p.ts, stageM: p.stageM, branch: p.branch,
+    oldDischarge: p.dischargeM3s, oldQuality: p.quality,
+    newDischarge: p.dischargeM3s, newQuality: p.quality, changed: false
+  }));
+  if (!rows.length) return;
+  const t0 = new Date(rows[0].ts).getTime();
+  const t1 = new Date(rows[rows.length - 1].ts).getTime();
+  const Q = (v) => v == null ? null : v;
+  const qs = rows.flatMap(r => [Q(r.oldDischarge), Q(r.newDischarge)]).filter(v => v != null);
+  const hs = rows.map(r => r.stageM).filter(v => v != null);
+  const qMin = Math.max(0, Math.min(...qs, ...hs.map(h => h * 8)) - 5);
+  const qMax = Math.max(...qs, ...hs.map(h => h * 8)) + 5;
+  const X = (ts) => P + (new Date(ts).getTime() - t0) / Math.max(1, t1 - t0) * (W - 2 * P);
+  const Y = (q) => H - P - (q - qMin) / (qMax - qMin) * (H - 2 * P);
+
+  for (let i = 0; i <= 6; i++) {
+    const q = qMin + (qMax - qMin) * i / 6;
+    el("text", { x: P - 6, y: Y(q) + 3, "text-anchor": "end" }, svg).textContent = q.toFixed(0);
+  }
+  function line(key, color, width, dashed) {
+    let d = "", gap = true;
+    rows.forEach(r => {
+      const v = r[key];
+      if (v == null) { gap = true; return; }
+      d += (gap ? "M" : "L") + X(r.ts).toFixed(1) + "," + Y(v).toFixed(1);
+      gap = false;
+    });
+    el("path", { d, fill: "none", stroke: color, "stroke-width": width,
+      "stroke-dasharray": dashed ? "5 3" : "none" }, svg);
+  }
+  line("oldDischarge", "#6b7280", 2, false);          // 现行流量：灰实线
+  line("newDischarge", "#1d6fe0", 2, previewData ? true : false); // 预览流量：蓝虚线
+  // 水位（右侧绿色，缩放显示）
+  let dh = "";
+  rows.forEach((r, i) => {
+    if (r.stageM == null) return;
+    dh += (i === 0 || rows[i - 1].stageM == null ? "M" : "L") +
+      X(r.ts).toFixed(1) + "," + Y(r.stageM * 8).toFixed(1);
+  });
+  el("path", { d: dh, fill: "none", stroke: "#16a34a", "stroke-width": 1.2,
+    "stroke-dasharray": "2 3", opacity: 0.8 }, svg);
+  // 质量异常点
+  for (const r of rows) {
+    const qual = previewData ? r.newQuality : r.oldQuality;
+    if (qual !== "OK") {
+      el("circle", { cx: X(r.ts), cy: H - P + 2, r: 3,
+        fill: qual === "MISSING_STAGE" ? "#b91c1c" : qual === "OVERFLOW" ? "#7c2d12"
+          : qual === "BRANCH_UNDETERMINED" ? "#a16207" : "#b45309" }, svg);
+    }
+  }
+  el("text", { x: W - 8, y: 16, "text-anchor": "end", fill: "#6b7280" }, svg)
+    .textContent = "灰实线=现行派生流量  蓝虚线=预览/草稿流量  绿点线=水位×8  底部彩点=质量标志";
+}
+
+function renderSeriesTable() {
+  const tb = $("seriesTable").querySelector("tbody");
+  tb.innerHTML = "";
+  const byTs = new Map(S.discharge.map(p => [p.ts, p]));
+  const rows = previewData ? previewData.deltas :
+    S.discharge.map(p => ({
+      ts: p.ts, stageM: p.stageM, branch: p.branch,
+      oldDischarge: p.dischargeM3s, oldQuality: p.quality,
+      newDischarge: p.dischargeM3s, newQuality: p.quality, changed: false
+    }));
+  const curveVer = new Map(S.curves.map(c => [c.id, "v" + c.version]));
+  for (const r of rows) {
+    const live = byTs.get(r.ts);
+    const qual = r.newQuality;
+    const tr = document.createElement("tr");
+    if (r.changed) {
+      tr.className = "changed";
+      const delta = (r.oldDischarge != null && r.newDischarge != null)
+        ? " Δ=" + (r.newDischarge - r.oldDischarge).toFixed(2) + " m³/s" : "";
+      tr.title = "该点将改变" + delta;
+    }
+    const oldTxt = r.oldDischarge == null
+      ? `<span class="q-${r.oldQuality}">${qName[r.oldQuality] || "—"}</span>`
+      : fmtQ(r.oldDischarge);
+    const newTxt = r.newDischarge == null
+      ? `<span class="q-${r.newQuality}">${qName[r.newQuality]}</span>`
+      : fmtQ(r.newDischarge);
+    tr.innerHTML =
+      `<td class="l">${day(r.ts)}</td>` +
+      `<td>${r.stageM == null ? '<span class="q-MISSING_STAGE">缺失</span>' : r.stageM.toFixed(2)}</td>` +
+      `<td class="diff">${oldTxt}</td>` +
+      `<td class="diff">${previewData ? newTxt : "—"}</td>` +
+      `<td><span class="q-${qual}">${qName[qual]}</span></td>` +
+      `<td>${branchName[r.branch] || "—"}</td>` +
+      `<td>${live && live.curveId != null ? (curveVer.get(live.curveId) || live.curveId) : "—"}</td>`;
+    tb.appendChild(tr);
+  }
+  drawSeriesChart();
+}
+
+$("previewBtn").addEventListener("click", async () => {
+  const c = curve();
+  if (c.status !== "DRAFT") { toast("请先在左侧选择一份草稿曲线再预览", true); return; }
+  try {
+    const from = $("winFrom").value.trim(), to = $("winTo").value.trim();
+    previewData = await api("POST", `/api/curves/${c.id}/preview`, { from, to });
+    $("previewSummary").textContent =
+      `预览 ${previewData.pointCount} 点，预计 ${previewData.changedCount} 点改变（未写入生产）`;
+    renderSeriesTable();
+    toast(`预览完成：${previewData.changedCount}/${previewData.pointCount} 点将改变。\n` +
+      "预览只在浏览器显示，未写入任何派生序列。");
+  } catch (err) { toast(err.message, true); }
+});
+
+$("recomputeBtn").addEventListener("click", async () => {
+  const mode = $("recomputeMode").value;
+  const c = curve();
+  const body = {
+    stationId: S.station.id,
+    jobId,
+    mode,
+    from: $("winFrom").value.trim(),
+    to: $("winTo").value.trim()
+  };
+  if (mode === "CURVE") {
+    if (c.status !== "PUBLISHED") {
+      toast("CURVE 模式只能选择一份已发布曲线；草稿禁止进入生产。", true);
+      return;
+    }
+    body.curveId = c.id;
+  }
+  if (!confirm("将对所选半开窗口执行原子批量重算。\n窗口内旧派生日被整体替换，窗口外不变；\n" +
+      "同一作业 ID 重试不会产生第二套序列。继续？")) return;
+  try {
+    const r = await api("POST", "/api/recompute", body);
+    $("recomputeResult").textContent =
+      `作业 ${r.jobId.slice(0, 8)} ${r.idempotentRetry ? "(重试，返回首次结果)" : ""}：` +
+      `改变 ${r.changedCount} / 写入 ${r.writtenCount}`;
+    // 重算后换新作业 ID，方便下一批操作；旧 ID 仍可在别处重放验证幂等
+    jobId = crypto.randomUUID();
+    previewData = null;
+    await refresh();
+    toast("重算完成");
+  } catch (err) { toast(err.message, true); }
+});
+
+function renderAll() {
+  renderStation();
+  renderMeasurements();
+  renderCurves();
+  renderResiduals();
+  renderSeriesTable();
+  $("previewSummary").textContent = "";
+}
+
+window.addEventListener("resize", () => {
+  if (S) { renderResiduals(); drawSeriesChart(); }
+});
+
+refresh().catch(err => toast("初始化失败：" + err.message, true));
+</script>
+</body>
+</html>
